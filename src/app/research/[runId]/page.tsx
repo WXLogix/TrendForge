@@ -308,7 +308,7 @@ export default function ResearchResultsPage() {
           </p>
 
           <a
-            href="/"
+            href={runId ? `/?run=${runId}` : "/"}
             className="mt-8 inline-flex rounded-xl bg-orange-500 px-5 py-3 font-semibold text-black transition hover:bg-orange-400"
           >
             Return to TrendForge
@@ -329,7 +329,7 @@ export default function ResearchResultsPage() {
 
         <header>
           <a
-            href="/"
+            href={`/?run=${data.research_run.id}`}
             className="text-sm text-zinc-500 transition hover:text-orange-400"
           >
             ← Back to TrendForge

@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
 type SearchStatus = "idle" | "loading" | "success" | "error";
 type TrackingFrequency = "daily" | "weekly" | "manual";
@@ -139,6 +139,56 @@ type RisingListing = EtsyListingResult & {
   reasons: string[];
 };
 
+const ANALYSIS_STORAGE_PREFIX = "trendforge:analysis:";
+
+function getAnalysisStorageKey(runId: number | string) {
+  return `${ANALYSIS_STORAGE_PREFIX}${runId}`;
+}
+
+function saveAnalysisToSession(analysis: SearchAnalysis) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.sessionStorage.setItem(
+      getAnalysisStorageKey(analysis.research_run_id),
+      JSON.stringify(analysis),
+    );
+  } catch (error) {
+    console.warn("TrendForge could not cache the current analysis:", error);
+  }
+}
+
+function loadAnalysisFromSession(runId: string): SearchAnalysis | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const stored = window.sessionStorage.getItem(getAnalysisStorageKey(runId));
+
+    if (!stored) {
+      return null;
+    }
+
+    const parsed = JSON.parse(stored) as SearchAnalysis;
+
+    if (
+      !parsed ||
+      parsed.success !== true ||
+      String(parsed.research_run_id) !== runId
+    ) {
+      return null;
+    }
+
+    return parsed;
+  } catch (error) {
+    console.warn("TrendForge could not restore the cached analysis:", error);
+    return null;
+  }
+}
+
 function formatNumber(value: number | null | undefined) {
   if (value === null || value === undefined) {
     return "—";
@@ -259,6 +309,45 @@ export default function Home() {
 
   const [trackingMessage, setTrackingMessage] = useState("");
 
+  /*
+   * ==========================================================
+   * RESTORE SAVED DASHBOARD ANALYSIS
+   * ==========================================================
+   *
+   * A completed dashboard analysis is cached for this browser
+   * tab and its research-run ID is placed in the URL.
+   *
+   * That means:
+   *
+   * Dashboard -> View All Results -> Back to TrendForge
+   *
+   * returns to the analysis instead of an empty homepage.
+   *
+   * Refreshing /?run=123 in the same tab also restores the
+   * analysis without creating another Etsy research run.
+   */
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const runId = params.get("run");
+
+    if (!runId) {
+      return;
+    }
+
+    const restored = loadAnalysisFromSession(runId);
+
+    if (!restored) {
+      return;
+    }
+
+    setAnalysis(restored);
+    setSearchTerm(restored.keyword);
+    setTrackingFrequency(restored.tracking?.frequency ?? "daily");
+    setSearchStatus("success");
+    setSearchMessage("");
+  }, []);
+
   async function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -289,11 +378,25 @@ export default function Home() {
         throw new Error(data.error || "Unable to analyze keyword.");
       }
 
-      setAnalysis(data);
+      const searchAnalysis = data as SearchAnalysis;
 
-      setTrackingFrequency(data.tracking?.frequency ?? "daily");
+      setAnalysis(searchAnalysis);
+
+      saveAnalysisToSession(searchAnalysis);
+
+      setTrackingFrequency(searchAnalysis.tracking?.frequency ?? "daily");
 
       setSearchStatus("success");
+
+      /*
+       * Preserve the current run in the URL without causing a
+       * navigation or another research request.
+       */
+      window.history.replaceState(
+        null,
+        "",
+        `/?run=${searchAnalysis.research_run_id}`,
+      );
     } catch (error) {
       setSearchStatus("error");
 
@@ -339,7 +442,7 @@ export default function Home() {
           return current;
         }
 
-        return {
+        const updatedAnalysis: SearchAnalysis = {
           ...current,
 
           tracking: {
@@ -350,6 +453,10 @@ export default function Home() {
             frequency: data.tracking?.tracking_frequency ?? null,
           },
         };
+
+        saveAnalysisToSession(updatedAnalysis);
+
+        return updatedAnalysis;
       });
 
       setTrackingMessage(data.message ?? "");
