@@ -139,6 +139,138 @@ type RisingListing = EtsyListingResult & {
   reasons: string[];
 };
 
+type TrackedMarketFilter = "all" | "surging" | "rising" | "cooling";
+
+type TrackedMarketTopMover = {
+  listing_id: number;
+  external_listing_id: string | null;
+  title: string;
+  url: string | null;
+  currency_code: string | null;
+  product_type: string | null;
+  previous: {
+    views: number | null;
+    favorites: number | null;
+    search_position: number | null;
+    market_position: number | null;
+    price: number | null;
+  };
+  latest: {
+    views: number | null;
+    favorites: number | null;
+    search_position: number | null;
+    market_position: number | null;
+    price: number | null;
+  };
+  change: {
+    views: number | null;
+    favorites: number | null;
+    search_rank: number | null;
+    market_rank: number | null;
+    price: number | null;
+  };
+  velocity: {
+    views_per_day: number | null;
+    favorites_per_day: number | null;
+    search_rank_positions_per_day: number | null;
+    market_rank_positions_per_day: number | null;
+  };
+  signal: {
+    score: number;
+    label:
+      | "collecting"
+      | "surging"
+      | "rising"
+      | "steady"
+      | "cooling"
+      | "declining";
+  };
+};
+
+type TrackedMarket = {
+  tracking_id: number;
+  keyword_id: number;
+  keyword: string;
+  category: string | null;
+  source: {
+    id: number;
+    code: string;
+    name: string;
+  } | null;
+  tracking_frequency: TrackingFrequency;
+  last_collected_at: string | null;
+  next_collection_at: string | null;
+  status: "ok" | "error";
+  error?: string;
+  details?: unknown;
+  has_history?: boolean;
+  has_meaningful_history?: boolean;
+  history_status?: string;
+  history_message?: string | null;
+  comparison_window?: {
+    elapsed_hours: number;
+    elapsed_days: number;
+  } | null;
+  latest_run?: {
+    id: number;
+    completed_at: string | null;
+    total_result_count: number | null;
+    returned_count: number;
+  } | null;
+  previous_run?: {
+    id: number;
+    completed_at: string | null;
+    total_result_count: number | null;
+    returned_count: number;
+  } | null;
+  marketplace?: {
+    latest_result_count: number | null;
+    previous_result_count: number | null;
+    result_count_change: number | null;
+  };
+  coverage?: {
+    previous_snapshot_count: number;
+    latest_snapshot_count: number;
+    matched_listings: number;
+    compared_relevant_listings: number;
+    new_to_latest_run: number;
+    disappeared_from_latest_run: number;
+  } | null;
+  signals?: {
+    collecting: number;
+    surging: number;
+    rising: number;
+    steady: number;
+    cooling: number;
+    declining: number;
+  } | null;
+  movement?: {
+    median_view_change: number | null;
+    average_view_change: number | null;
+    median_favorite_change: number | null;
+    average_favorite_change: number | null;
+    median_rank_change: number | null;
+    average_rank_change: number | null;
+    listings_with_view_growth: number;
+    listings_with_favorite_growth: number;
+    rank_improved_count: number;
+    rank_declined_count: number;
+    rank_unchanged_count: number;
+  } | null;
+  top_mover?: TrackedMarketTopMover | null;
+  attention_score?: number;
+};
+
+type TrackedMarketsResponse = {
+  success: boolean;
+  generated_at: string;
+  tracked_market_count: number;
+  ready_market_count: number;
+  collecting_market_count: number;
+  error_market_count: number;
+  markets: TrackedMarket[];
+};
+
 const ANALYSIS_STORAGE_PREFIX = "trendforge:analysis:";
 
 function getAnalysisStorageKey(runId: number | string) {
@@ -293,6 +425,54 @@ function formatVelocity(value: number, decimals = 1) {
   return value.toFixed(decimals);
 }
 
+function formatSignedNumber(value: number | null | undefined) {
+  if (value === null || value === undefined) {
+    return "—";
+  }
+
+  if (value === 0) {
+    return "0";
+  }
+
+  return `${value > 0 ? "+" : ""}${formatNumber(value)}`;
+}
+
+function formatCompactDateTime(value: string | null | undefined) {
+  if (!value) {
+    return "Not collected yet";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Unknown time";
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function signalTextClass(label: TrackedMarketTopMover["signal"]["label"]) {
+  switch (label) {
+    case "surging":
+      return "text-fuchsia-300";
+    case "rising":
+      return "text-green-300";
+    case "steady":
+      return "text-zinc-300";
+    case "cooling":
+      return "text-amber-300";
+    case "declining":
+      return "text-red-300";
+    default:
+      return "text-zinc-400";
+  }
+}
+
 export default function Home() {
   const [searchTerm, setSearchTerm] = useState("");
 
@@ -308,6 +488,66 @@ export default function Home() {
   const [trackingBusy, setTrackingBusy] = useState(false);
 
   const [trackingMessage, setTrackingMessage] = useState("");
+
+  const [trackedMarkets, setTrackedMarkets] = useState<TrackedMarket[]>([]);
+
+  const [trackedMarketsStatus, setTrackedMarketsStatus] =
+    useState<SearchStatus>("loading");
+
+  const [trackedMarketsMessage, setTrackedMarketsMessage] = useState("");
+
+  const [trackedMarketFilter, setTrackedMarketFilter] =
+    useState<TrackedMarketFilter>("all");
+
+  const [expandedTrackedMarketId, setExpandedTrackedMarketId] = useState<
+    number | null
+  >(null);
+
+  const [trackedMarketsMeta, setTrackedMarketsMeta] = useState({
+    tracked: 0,
+    ready: 0,
+    collecting: 0,
+    errors: 0,
+  });
+
+  async function loadTrackedMarkets() {
+    setTrackedMarketsStatus("loading");
+    setTrackedMarketsMessage("");
+
+    try {
+      const response = await fetch("/api/tracked-markets", {
+        cache: "no-store",
+      });
+
+      const data = (await response.json()) as TrackedMarketsResponse & {
+        error?: string;
+      };
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || "Unable to load tracked markets.");
+      }
+
+      setTrackedMarkets(data.markets ?? []);
+      setTrackedMarketsMeta({
+        tracked: data.tracked_market_count ?? 0,
+        ready: data.ready_market_count ?? 0,
+        collecting: data.collecting_market_count ?? 0,
+        errors: data.error_market_count ?? 0,
+      });
+      setTrackedMarketsStatus("success");
+    } catch (error) {
+      setTrackedMarketsStatus("error");
+      setTrackedMarketsMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to load tracked markets.",
+      );
+    }
+  }
+
+  useEffect(() => {
+    void loadTrackedMarkets();
+  }, []);
 
   /*
    * ==========================================================
@@ -460,6 +700,7 @@ export default function Home() {
       });
 
       setTrackingMessage(data.message ?? "");
+      void loadTrackedMarkets();
     } catch (error) {
       setTrackingMessage(
         error instanceof Error ? error.message : "Unable to update tracking.",
@@ -817,6 +1058,30 @@ export default function Home() {
       .slice(0, 4);
   }, [relevantListings]);
 
+  const filteredTrackedMarkets = useMemo(() => {
+    if (trackedMarketFilter === "all") {
+      return trackedMarkets;
+    }
+
+    return trackedMarkets.filter((market) => {
+      const signals = market.signals;
+
+      if (!signals) {
+        return false;
+      }
+
+      if (trackedMarketFilter === "surging") {
+        return signals.surging > 0;
+      }
+
+      if (trackedMarketFilter === "rising") {
+        return signals.rising > 0 || signals.surging > 0;
+      }
+
+      return signals.cooling > 0 || signals.declining > 0;
+    });
+  }, [trackedMarketFilter, trackedMarkets]);
+
   const cadCount = analysis?.market_summary.cad_listing_count ?? 0;
 
   return (
@@ -905,6 +1170,398 @@ export default function Home() {
               </p>
             </div>
           )}
+        </section>
+
+        {/* =====================================================
+            TRACKED MARKETS
+        ====================================================== */}
+
+        <section className="mt-10">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <p className="text-sm font-medium uppercase tracking-[0.16em] text-orange-400">
+                TRACKED MARKETS
+              </p>
+
+              <h2 className="mt-1 text-2xl font-semibold">
+                Markets TrendForge is monitoring over time
+              </h2>
+
+              <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-500">
+                Historical movement from saved research snapshots. Use this list
+                to quickly spot markets with active movers, then expand a row
+                for more detail.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-400">
+                {trackedMarketsMeta.tracked} tracked
+              </span>
+
+              <span className="rounded-full border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-400">
+                {trackedMarketsMeta.ready} ready
+              </span>
+
+              <button
+                type="button"
+                onClick={() => void loadTrackedMarkets()}
+                disabled={trackedMarketsStatus === "loading"}
+                className="rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-zinc-300 transition hover:border-orange-500 hover:text-orange-400 disabled:opacity-50"
+              >
+                {trackedMarketsStatus === "loading"
+                  ? "Refreshing..."
+                  : "Refresh"}
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-5 flex flex-wrap gap-2">
+            {(
+              ["all", "surging", "rising", "cooling"] as TrackedMarketFilter[]
+            ).map((filter) => {
+              const active = trackedMarketFilter === filter;
+
+              return (
+                <button
+                  key={filter}
+                  type="button"
+                  onClick={() => setTrackedMarketFilter(filter)}
+                  className={`rounded-full border px-3 py-1.5 text-xs font-semibold capitalize transition ${
+                    active
+                      ? "border-orange-500 bg-orange-500/10 text-orange-400"
+                      : "border-zinc-800 bg-zinc-900 text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
+                  }`}
+                >
+                  {filter}
+                </button>
+              );
+            })}
+          </div>
+
+          {trackedMarketsStatus === "error" && (
+            <div className="mt-5 rounded-xl border border-red-900 bg-red-950/40 p-4">
+              <p className="text-sm font-medium text-red-400">
+                {trackedMarketsMessage || "Unable to load tracked markets."}
+              </p>
+            </div>
+          )}
+
+          {trackedMarketsStatus === "loading" &&
+            trackedMarkets.length === 0 && (
+              <div className="mt-5 rounded-2xl border border-zinc-800 bg-zinc-900 p-6">
+                <p className="text-sm text-zinc-500">
+                  Loading tracked markets...
+                </p>
+              </div>
+            )}
+
+          {filteredTrackedMarkets.length > 0 && (
+            <div className="mt-5 overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900">
+              <div className="hidden grid-cols-[52px_minmax(220px,1.5fr)_110px_110px_88px_88px_110px_44px] gap-3 border-b border-zinc-800 bg-zinc-950/60 px-4 py-3 text-[11px] font-semibold uppercase tracking-wide text-zinc-600 lg:grid">
+                <span>#</span>
+                <span>Market</span>
+                <span>Results</span>
+                <span>Δ Market</span>
+                <span>Surging</span>
+                <span>Rising</span>
+                <span>Attention</span>
+                <span />
+              </div>
+
+              <div className="divide-y divide-zinc-800">
+                {filteredTrackedMarkets.map((market, index) => {
+                  const isExpanded =
+                    expandedTrackedMarketId === market.keyword_id;
+
+                  const marketplace = market.marketplace ?? {
+                    latest_result_count: null,
+                    previous_result_count: null,
+                    result_count_change: null,
+                  };
+
+                  const resultChange = marketplace.result_count_change ?? 0;
+
+                  const resultChangeClass =
+                    resultChange > 0
+                      ? "text-amber-300"
+                      : resultChange < 0
+                        ? "text-emerald-400"
+                        : "text-zinc-500";
+
+                  const topMover = market.top_mover ?? null;
+
+                  const signals = market.signals ?? {
+                    collecting: 0,
+                    surging: 0,
+                    rising: 0,
+                    steady: 0,
+                    cooling: 0,
+                    declining: 0,
+                  };
+
+                  const coverage = market.coverage ?? {
+                    previous_snapshot_count: 0,
+                    latest_snapshot_count: 0,
+                    matched_listings: 0,
+                    compared_relevant_listings: 0,
+                    new_to_latest_run: 0,
+                    disappeared_from_latest_run: 0,
+                  };
+
+                  return (
+                    <div key={market.keyword_id}>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedTrackedMarketId((current) =>
+                            current === market.keyword_id
+                              ? null
+                              : market.keyword_id,
+                          )
+                        }
+                        className="grid w-full gap-3 px-4 py-4 text-left transition hover:bg-zinc-950/40 lg:grid-cols-[52px_minmax(220px,1.5fr)_110px_110px_88px_88px_110px_44px] lg:items-center"
+                      >
+                        <div className="hidden text-sm font-medium text-zinc-600 lg:block">
+                          {index + 1}
+                        </div>
+
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="truncate text-base font-semibold capitalize text-white">
+                              {market.keyword}
+                            </h3>
+
+                            {signals.surging > 0 && (
+                              <span className="rounded-full bg-fuchsia-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase text-fuchsia-400">
+                                {signals.surging} surging
+                              </span>
+                            )}
+
+                            {signals.rising > 0 && signals.surging === 0 && (
+                              <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-400">
+                                {signals.rising} rising
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-600 lg:hidden">
+                            <span>
+                              {formatNumber(marketplace.latest_result_count)}{" "}
+                              results
+                            </span>
+                            <span className={resultChangeClass}>
+                              {resultChange > 0 ? "+" : ""}
+                              {formatNumber(resultChange)}
+                            </span>
+                            <span>
+                              {formatDecimal(market.attention_score, 1)}{" "}
+                              attention
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="hidden text-sm font-medium text-zinc-300 lg:block">
+                          {formatNumber(marketplace.latest_result_count)}
+                        </div>
+
+                        <div
+                          className={`hidden text-sm font-semibold lg:block ${resultChangeClass}`}
+                        >
+                          {resultChange > 0 ? "+" : ""}
+                          {formatNumber(resultChange)}
+                        </div>
+
+                        <div className="hidden text-sm font-semibold text-fuchsia-400 lg:block">
+                          {signals.surging}
+                        </div>
+
+                        <div className="hidden text-sm font-semibold text-emerald-400 lg:block">
+                          {signals.rising}
+                        </div>
+
+                        <div className="hidden lg:block">
+                          <span className="inline-flex min-w-[58px] justify-center rounded-lg bg-orange-500/10 px-2.5 py-1.5 text-sm font-bold text-orange-400">
+                            {formatDecimal(market.attention_score, 1)}
+                          </span>
+                        </div>
+
+                        <div className="flex justify-end">
+                          <span
+                            className={`text-lg text-zinc-500 transition ${
+                              isExpanded ? "rotate-180" : ""
+                            }`}
+                          >
+                            ⌄
+                          </span>
+                        </div>
+                      </button>
+
+                      {isExpanded && (
+                        <div className="border-t border-zinc-800 bg-zinc-950/50 px-4 py-5">
+                          <div className="grid gap-4 lg:grid-cols-[1.2fr_1fr]">
+                            <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
+                              <div className="flex flex-wrap items-center justify-between gap-3">
+                                <div>
+                                  <p className="text-xs font-semibold uppercase tracking-wide text-zinc-600">
+                                    Signal breakdown
+                                  </p>
+
+                                  <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                                    <span className="rounded-full bg-fuchsia-500/10 px-2.5 py-1 font-semibold text-fuchsia-400">
+                                      {signals.surging} Surging
+                                    </span>
+                                    <span className="rounded-full bg-emerald-500/10 px-2.5 py-1 font-semibold text-emerald-400">
+                                      {signals.rising} Rising
+                                    </span>
+                                    <span className="rounded-full bg-zinc-800 px-2.5 py-1 font-semibold text-zinc-400">
+                                      {signals.steady} Steady
+                                    </span>
+                                    <span className="rounded-full bg-amber-500/10 px-2.5 py-1 font-semibold text-amber-400">
+                                      {signals.cooling} Cooling
+                                    </span>
+                                    <span className="rounded-full bg-red-500/10 px-2.5 py-1 font-semibold text-red-400">
+                                      {signals.declining} Declining
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <div className="text-right">
+                                  <p className="text-xs uppercase tracking-wide text-zinc-600">
+                                    Window
+                                  </p>
+                                  <p className="mt-1 font-semibold text-white">
+                                    {formatDecimal(
+                                      market.comparison_window?.elapsed_hours ??
+                                        null,
+                                      1,
+                                    )}
+                                    h
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                                <div className="rounded-lg bg-zinc-900 p-3">
+                                  <p className="text-xs uppercase text-zinc-600">
+                                    New
+                                  </p>
+                                  <p className="mt-1 font-semibold">
+                                    {formatNumber(coverage.new_to_latest_run)}
+                                  </p>
+                                </div>
+                                <div className="rounded-lg bg-zinc-900 p-3">
+                                  <p className="text-xs uppercase text-zinc-600">
+                                    Disappeared
+                                  </p>
+                                  <p className="mt-1 font-semibold">
+                                    {formatNumber(
+                                      coverage.disappeared_from_latest_run,
+                                    )}
+                                  </p>
+                                </div>
+                                <div className="rounded-lg bg-zinc-900 p-3">
+                                  <p className="text-xs uppercase text-zinc-600">
+                                    Matched
+                                  </p>
+                                  <p className="mt-1 font-semibold">
+                                    {formatNumber(coverage.matched_listings)}
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
+                              <div className="flex items-center justify-between gap-3">
+                                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-600">
+                                  Top mover
+                                </p>
+
+                                {topMover && (
+                                  <span className="text-sm font-bold text-white">
+                                    {formatDecimal(topMover.signal.score, 1)}
+                                  </span>
+                                )}
+                              </div>
+
+                              {topMover ? (
+                                <>
+                                  <p className="mt-3 line-clamp-2 font-medium leading-6 text-zinc-200">
+                                    {decodeHtml(topMover.title)}
+                                  </p>
+
+                                  <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-xs text-zinc-500">
+                                    <span>
+                                      Views{" "}
+                                      {formatSignedNumber(
+                                        topMover.change.views,
+                                      )}
+                                    </span>
+                                    <span>
+                                      Favorites{" "}
+                                      {formatSignedNumber(
+                                        topMover.change.favorites,
+                                      )}
+                                    </span>
+                                    <span>
+                                      Rank{" "}
+                                      {formatSignedNumber(
+                                        topMover.change.market_rank ??
+                                          topMover.change.search_rank,
+                                      )}
+                                    </span>
+                                  </div>
+                                </>
+                              ) : (
+                                <p className="mt-3 text-sm text-zinc-500">
+                                  No historical mover is available yet.
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="mt-4 flex flex-col gap-3 border-t border-zinc-800 pt-4 text-xs text-zinc-600 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="flex flex-wrap gap-x-4 gap-y-1">
+                              <span>
+                                Last collected{" "}
+                                {formatCompactDateTime(
+                                  market.last_collected_at,
+                                )}
+                              </span>
+                              <span>
+                                Next collection{" "}
+                                {formatCompactDateTime(
+                                  market.next_collection_at,
+                                )}
+                              </span>
+                            </div>
+
+                            {market.latest_run?.id && (
+                              <a
+                                href={`/research/${market.latest_run.id}`}
+                                className="inline-flex items-center justify-center rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-200 transition hover:border-orange-500 hover:text-orange-400"
+                              >
+                                View Latest Research →
+                              </a>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {trackedMarketsStatus !== "loading" &&
+            filteredTrackedMarkets.length === 0 && (
+              <div className="mt-5 rounded-2xl border border-zinc-800 bg-zinc-900 p-6">
+                <p className="text-sm text-zinc-500">
+                  No tracked markets match this filter yet.
+                </p>
+              </div>
+            )}
         </section>
 
         {/* =====================================================
