@@ -51,7 +51,7 @@ type CollectionResult = {
   error?: string;
 };
 
-const MAX_KEYWORDS_PER_RUN = 10;
+const MAX_KEYWORDS_PER_RUN = 2;
 
 /*
  * ============================================================
